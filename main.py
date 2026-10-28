@@ -55,6 +55,51 @@ def keys_status():
         "has_gemini_key": bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
     }
 
+@app.get("/api/keys/verify-gemini")
+def verify_gemini(key: str = None):
+    """
+    Diagnostic probe to check whether a Gemini API key is valid or revoked/leaked.
+    Checks the key provided as ?key=... or falls back to server env GEMINI_API_KEY.
+    """
+    import httpx
+    target_key = key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not target_key or len(target_key.strip()) < 10:
+        return {"valid": False, "status_code": 400, "message": "No key provided in query or environment."}
+
+    target_key = target_key.strip()
+    masked = target_key[:6] + "..." + target_key[-4:] if len(target_key) > 10 else "***"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={target_key}"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+        "generationConfig": {"maxOutputTokens": 3}
+    }
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(url, json=payload)
+            if resp.status_code == 200:
+                return {
+                    "valid": True,
+                    "status_code": 200,
+                    "key_masked": masked,
+                    "message": "Gemini API key is ACTIVE and verified successfully!"
+                }
+            else:
+                err_body = resp.json() if "application/json" in resp.headers.get("content-type", "") else {"raw": resp.text}
+                return {
+                    "valid": False,
+                    "status_code": resp.status_code,
+                    "key_masked": masked,
+                    "error_details": err_body
+                }
+    except Exception as e:
+        return {
+            "valid": False,
+            "status_code": 500,
+            "key_masked": masked,
+            "error_details": str(e)
+        }
+
 @app.get("/api/presets")
 def get_presets():
     return {"presets": PRESETS}

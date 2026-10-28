@@ -2,9 +2,17 @@ import time
 import os
 import json
 import re
+import logging
 from typing import List, Dict, Any, Optional
 import httpx
 from models.schemas import QuestionConfig, JudgmentOutput, BenchmarkMetrics, ModelResult
+
+logger = logging.getLogger("gemini_engine")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    ch.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] [GeminiEngine] %(message)s"))
+    logger.addHandler(ch)
 
 try:
     import tiktoken
@@ -56,8 +64,10 @@ class GeminiBaselineEngine:
         )
 
         if key and len(key.strip()) > 10:
+            masked = key[:6] + "..." + key[-4:] if len(key) > 10 else "***"
+            logger.info(f"Attempting live Gemini API call with key {masked} for model {llm_model}")
             try:
-                return GeminiBaselineEngine._call_real_gemini(
+                res = GeminiBaselineEngine._call_real_gemini(
                     text_to_judge,
                     questions,
                     llm_model,
@@ -65,10 +75,16 @@ class GeminiBaselineEngine:
                     custom_system_prompt,
                     custom_user_prompt
                 )
+                logger.info(f"Gemini API SUCCESS: latency={res.metrics.latency_ms}ms, in_tokens={res.metrics.input_tokens}, out_tokens={res.metrics.output_tokens}")
+                return res
             except Exception as e:
+                err_msg = f"Gemini API Error ({type(e).__name__}): {str(e)}"
+                logger.error(f"Gemini API call FAILED: {err_msg}")
                 sim_res = GeminiBaselineEngine._simulate_gemini(text_to_judge, questions, llm_model)
-                sim_res.error = f"Gemini API Error ({type(e).__name__}): {str(e)}. Showing local evaluation."
+                sim_res.error = f"{err_msg}. Showing local evaluation."
                 return sim_res
+        else:
+            logger.warning("No valid GEMINI_API_KEY detected in env or request. Using local simulated evaluation.")
 
         return GeminiBaselineEngine._simulate_gemini(text_to_judge, questions, llm_model)
 
@@ -140,12 +156,15 @@ class GeminiBaselineEngine:
 
         start_time = time.perf_counter()
         with httpx.Client(timeout=45.0) as client:
+            logger.info(f"Posting request to Gemini endpoint: {target_model}")
             resp = client.post(url, json=payload)
             # If primary model encounters high demand or error, fallback to gemini-flash-lite-latest / 2.5-flash
             if resp.status_code != 200:
+                logger.warning(f"Primary model {target_model} returned HTTP {resp.status_code}: {resp.text[:250]}. Trying fallback model gemini-flash-lite-latest...")
                 fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={api_key}"
                 resp = client.post(fallback_url, json=payload)
                 if resp.status_code != 200:
+                    logger.warning(f"Fallback 1 returned HTTP {resp.status_code}: {resp.text[:250]}. Trying fallback model gemini-2.5-flash...")
                     fallback_url2 = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
                     resp = client.post(fallback_url2, json=payload)
 
@@ -153,6 +172,7 @@ class GeminiBaselineEngine:
         latency_ms = int(elapsed_sec * 1000)
 
         if resp.status_code != 200:
+            logger.error(f"All Gemini endpoints failed with status {resp.status_code}: {resp.text}")
             raise RuntimeError(f"Gemini API HTTP {resp.status_code}: {resp.text}")
 
         data = resp.json()
