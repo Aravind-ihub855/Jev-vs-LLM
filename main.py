@@ -1,7 +1,9 @@
 import asyncio
 import os
+import json
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 
@@ -115,6 +117,85 @@ async def evaluate(request: EvaluationRequest):
         jev_result=jev_result,
         llm_result=llm_result,
         comparison_delta=delta
+    )
+
+@app.post("/api/evaluate/stream")
+async def evaluate_stream(request: EvaluationRequest):
+    if not request.text_to_judge.strip():
+        raise HTTPException(status_code=400, detail="Text to judge cannot be empty.")
+    if not request.questions:
+        raise HTTPException(status_code=400, detail="At least one question is required.")
+
+    async def event_generator():
+        loop = asyncio.get_event_loop()
+        jev_key = request.typesafe_api_key or request.api_key
+        gemini_key = request.gemini_api_key or request.llm_api_key or request.api_key
+
+        # Launch Jev and Gemini concurrently
+        jev_task = loop.run_in_executor(
+            None,
+            JevDecisionEngine.evaluate,
+            request.text_to_judge,
+            request.questions,
+            request.model,
+            jev_key
+        )
+
+        llm_task = None
+        if request.compare_with_llm:
+            llm_task = loop.run_in_executor(
+                None,
+                GeminiBaselineEngine.evaluate,
+                request.text_to_judge,
+                request.questions,
+                request.llm_model,
+                request.llm_provider,
+                gemini_key,
+                request.custom_system_prompt,
+                request.custom_user_prompt
+            )
+
+        # 1. Await Jev first (completes in ~18ms) and immediately stream to frontend
+        jev_result = await jev_task
+        jev_data = json.dumps({"jev_result": jev_result.model_dump()})
+        yield f"event: jev_done\ndata: {jev_data}\n\n"
+
+        # 2. Await Gemini if requested and stream completion
+        if llm_task is not None:
+            llm_result = await llm_task
+
+            speedup = round(llm_result.metrics.latency_ms / max(1, jev_result.metrics.latency_ms), 1)
+            token_savings = round(
+                ((llm_result.metrics.total_tokens - jev_result.metrics.total_tokens) / max(1, llm_result.metrics.total_tokens)) * 100,
+                1
+            )
+            cost_savings = round(
+                ((llm_result.metrics.estimated_cost_usd - jev_result.metrics.estimated_cost_usd) / max(0.000001, llm_result.metrics.estimated_cost_usd)) * 100,
+                1
+            )
+
+            delta = ComparisonDelta(
+                speedup_ratio=max(1.0, speedup),
+                token_savings_percent=max(0.0, token_savings),
+                cost_savings_percent=max(0.0, cost_savings)
+            )
+
+            llm_data = json.dumps({
+                "llm_result": llm_result.model_dump(),
+                "comparison_delta": delta.model_dump()
+            })
+            yield f"event: llm_done\ndata: {llm_data}\n\n"
+
+        yield "event: complete\ndata: {}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
     )
 
 if __name__ == "__main__":
