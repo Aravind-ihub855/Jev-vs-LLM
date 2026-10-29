@@ -281,8 +281,11 @@ class JevDecisionEngine:
             elif "zero respect" in text_lower or "negligence" in text_lower or "total garbage" in text_lower or "harassment" in text_lower or "fired" in text_lower:
                 selected_label = next((l for l in labels if "hostile" in l.lower() or "abusive" in l.lower()), labels[0] if labels else "Hostile & abusive")
                 conf = 0.97
+            elif "byzantine" in text_lower or "tla+" in text_lower or "event-driven" in text_lower or "kafka" in text_lower:
+                selected_label = next((l for l in labels if "opus" in l.lower() or "claude" in l.lower()), labels[0] if labels else "Claude 3.5 Opus")
+                conf = 0.99
             elif "parquet" in text_lower or "pipeline" in text_lower or "python" in text_lower or "pandas" in text_lower or "matplotlib" in text_lower:
-                selected_label = next((l for l in labels if "data" in l.lower() or "code" in l.lower()), labels[0] if labels else "Data Analysis & Code")
+                selected_label = next((l for l in labels if "data" in l.lower() or "code" in l.lower()), labels[0] if labels else "Data Analysis & Code Agent")
                 conf = 0.99
             elif "acoustic isolation" in text_lower or "finest audio" in text_lower or "headphones" in text_lower or "amazing" in text_lower:
                 selected_label = next((l for l in labels if "positive" in l.lower()), labels[0] if labels else "Positive")
